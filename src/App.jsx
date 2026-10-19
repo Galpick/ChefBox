@@ -27,6 +27,7 @@ import {
 import Sidebar from './components/Sidebar.jsx';
 import Header from './components/Header.jsx';
 import RecipeCard from './components/RecipeCard.jsx';
+import RecipeDetailModal from './components/RecipeDetailModal.jsx';
 import AddRecipeModal from './components/AddRecipeModal.jsx';
 import EmptyState from './components/EmptyState.jsx';
 import {
@@ -94,6 +95,7 @@ export default function App() {
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [editingRecipe, setEditingRecipe] = useState(null);
+  const [viewingRecipe, setViewingRecipe] = useState(null);
   const [mealPlan, setMealPlan] = useState(() => getMealPlan());
   const [shoppingItems, setShoppingItems] = useState(() => getShoppingItems());
   const [settings, setSettings] = useState(() => getSettings());
@@ -153,24 +155,30 @@ export default function App() {
     setActiveView('recipes');
   };
 
+  const handleViewRecipe = (recipe) => setViewingRecipe(recipe);
+
   const handleEditRecipe = (recipe) => {
+    setViewingRecipe(null);
     setEditingRecipe(recipe);
     setModalOpen(true);
   };
 
   const handleDeleteRecipe = (recipe) => {
     const answer = window.confirm(`למחוק את המתכון ״${recipe.name}״? הפעולה תסיר גם אותו מתכנון הארוחות.`);
-    if (!answer) return;
+    if (!answer) return false;
     deleteRecipe(recipe.id);
     setRecipes(getRecipes());
     setMealPlan(getMealPlan());
     setShoppingItems(getShoppingItems());
     showToast('המתכון נמחק', 'info');
+    return true;
   };
 
   const handleToggleFavorite = (recipe) => {
-    saveRecipe({ ...recipe, favorite: !recipe.favorite });
+    const updated = { ...recipe, favorite: !recipe.favorite };
+    saveRecipe(updated);
     setRecipes(getRecipes());
+    setViewingRecipe((current) => current?.id === recipe.id ? updated : current);
     showToast(recipe.favorite ? 'המתכון הוסר מהמועדפים' : 'המתכון נשמר במועדפים');
   };
 
@@ -360,7 +368,7 @@ export default function App() {
 
                   {visibleRecipes.length ? (
                     <div className={`recipe-grid ${settings.compactCards ? 'recipe-grid-compact' : ''}`}>
-                      {visibleRecipes.map((recipe) => <RecipeCard key={recipe.id} recipe={recipe} onToggleFavorite={handleToggleFavorite} onDelete={handleDeleteRecipe} onEdit={handleEditRecipe} onPlan={handlePlanRecipe} onAddToShopping={handleAddToShopping} />)}
+                      {visibleRecipes.map((recipe) => <RecipeCard key={recipe.id} recipe={recipe} onView={handleViewRecipe} onToggleFavorite={handleToggleFavorite} onDelete={handleDeleteRecipe} onEdit={handleEditRecipe} onPlan={handlePlanRecipe} onAddToShopping={handleAddToShopping} />)}
                     </div>
                   ) : (
                     <EmptyState icon={activeView === 'favorites' ? Heart : Search} title={searchValue ? 'לא מצאנו מתכונים מתאימים' : activeView === 'favorites' ? 'עוד אין כאן מועדפים' : 'הספרייה שלכם מחכה למתכון הראשון'} description={searchValue ? 'נסו מילות חיפוש אחרות או הסירו את הסינון לפי קטגוריה.' : activeView === 'favorites' ? 'לחצו על הלב בכרטיס מתכון כדי לשמור אותו כאן.' : 'הוסיפו מתכון ידנית או חלצו אותו מקישור של אתר מתכונים.'} actionLabel={searchValue ? 'ניקוי החיפוש' : 'הוספת מתכון'} onAction={searchValue ? () => { setSearchValue(''); setCategoryFilter('הכל'); } : openAddModal} />
@@ -376,7 +384,7 @@ export default function App() {
             ) : activeView === 'shopping' ? (
               <ShoppingView items={shoppingItems} onToggle={handleToggleShoppingItem} onDelete={handleDeleteShoppingItem} onAddManual={handleAddManualShoppingItem} onClearCompleted={handleClearCompleted} filter={shoppingFilter} onFilterChange={setShoppingFilter} onNavigateRecipes={() => handleNavigate('recipes')} />
             ) : (
-              <SettingsView settings={settings} onChange={handleSettingsChange} onExport={handleExport} onReset={handleResetDemo} recipeCount={recipes.length} apiKey={aiApiKey} onSaveApiKey={handleSaveAiApiKey} onDeleteApiKey={handleDeleteAiApiKey} onTestApiKey={testOpenAiApiKey} />
+              <SettingsView settings={settings} onChange={handleSettingsChange} onExport={handleExport} onReset={handleResetDemo} recipeCount={recipes.length} apiKey={aiApiKey} onSaveApiKey={handleSaveAiApiKey} onDeleteApiKey={handleDeleteAiApiKey} onTestApiKey={(key) => testOpenAiApiKey(key, settings.aiModel || 'gpt-5-mini')} />
             )}
 
             <footer className="app-footer"><span>© 2026 ChefBox</span><span>בישול טוב מתחיל בתכנון טוב <span className="footer-heart">♥</span></span><span className="footer-status"><i /> הנתונים נשמרים מקומית</span></footer>
@@ -384,6 +392,7 @@ export default function App() {
         </main>
       </div>
 
+      <RecipeDetailModal recipe={viewingRecipe} onClose={() => setViewingRecipe(null)} onEdit={handleEditRecipe} onDelete={handleDeleteRecipe} onPlan={handlePlanRecipe} onAddToShopping={handleAddToShopping} onToggleFavorite={handleToggleFavorite} />
       <AddRecipeModal isOpen={modalOpen} onClose={() => { setModalOpen(false); setEditingRecipe(null); }} onSave={handleSaveRecipe} initialRecipe={editingRecipe} />
       {toast && <div className={`toast toast-${toast.kind}`} role="status"><span className="toast-icon">{toast.kind === 'success' ? <Check size={17} /> : <CircleHelp size={17} />}</span><span>{toast.message}</span><button onClick={() => setToast(null)} aria-label="סגירת הודעה"><X size={15} /></button></div>}
     </div>

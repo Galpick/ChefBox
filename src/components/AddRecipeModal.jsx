@@ -13,7 +13,7 @@ import {
   UsersRound,
   X,
 } from 'lucide-react';
-import { parseRecipeFromUrl } from '../services/aiParser.js';
+import { parseRecipeFromText, parseRecipeFromUrl } from '../services/aiParser.js';
 
 const emptyDraft = () => ({
   name: '', category: 'ארוחת ערב', prepTime: 15, cookTime: 20, servings: 2,
@@ -27,6 +27,9 @@ export default function AddRecipeModal({ isOpen, onClose, onSave, initialRecipe 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
+  const [noticeKind, setNoticeKind] = useState('success');
+  const [showPasteFallback, setShowPasteFallback] = useState(false);
+  const [pastedText, setPastedText] = useState('');
   const [ingredientsText, setIngredientsText] = useState('');
   const [instructionsText, setInstructionsText] = useState('');
 
@@ -41,6 +44,9 @@ export default function AddRecipeModal({ isOpen, onClose, onSave, initialRecipe 
     setLoading(false);
     setError('');
     setNotice('');
+    setNoticeKind('success');
+    setShowPasteFallback(false);
+    setPastedText('');
   }, [isOpen, initialRecipe]);
 
   useEffect(() => {
@@ -59,13 +65,22 @@ export default function AddRecipeModal({ isOpen, onClose, onSave, initialRecipe 
     setLoading(true);
     setError('');
     setNotice('');
+    setNoticeKind('success');
     try {
-      const parsed = await parseRecipeFromUrl(url);
-      const nextDraft = { ...emptyDraft(), ...parsed, favorite: initialRecipe?.favorite || false };
+      const parsed = pastedText.trim()
+        ? await parseRecipeFromText(url, pastedText)
+        : await parseRecipeFromUrl(url);
+      const recipeFields = { ...parsed };
+      delete recipeFields.parsedBy;
+      delete recipeFields.extractionWarning;
+      delete recipeFields.totalTime;
+      const nextDraft = { ...emptyDraft(), ...recipeFields, favorite: initialRecipe?.favorite || false };
       setDraft(nextDraft);
       setIngredientsText((nextDraft.ingredients || []).join('\n'));
       setInstructionsText((nextDraft.instructions || []).join('\n'));
-      setNotice(`החילוץ הושלם${parsed.parsedBy === 'schema.org' ? ' באמצעות Schema.org' : parsed.parsedBy === 'ai' ? ' באמצעות שירות AI' : ' באמצעות תגיות העמוד'}. מומלץ לעבור על הפרטים לפני השמירה.`);
+      const methodLabel = parsed.parsedBy === 'schema.org' ? 'Schema.org' : parsed.parsedBy === 'ai' ? 'AI' : parsed.parsedBy === 'text' ? 'הטקסט שהודבק' : 'העמוד';
+      setNoticeKind(parsed.extractionWarning ? 'warning' : 'success');
+      setNotice(`החילוץ הסתיים באמצעות ${methodLabel}. ${parsed.extractionWarning || 'מומלץ לעבור על הפרטים לפני השמירה.'}`);
     } catch (extractError) {
       setError(extractError?.message || 'התרחשה שגיאה בחילוץ. נסו שוב או הזינו את המתכון ידנית.');
     } finally {
@@ -132,10 +147,12 @@ export default function AddRecipeModal({ isOpen, onClose, onSave, initialRecipe 
                     {loading ? 'מחלצים...' : 'חלצו מתכון'}
                   </button>
                 </div>
-                <div className="extract-helper"><Sparkles size={14} /><span>ננסה לזהות רכיבים והוראות מהמידע המובנה בעמוד. התוצאה דורשת בדיקה לפני השמירה.</span></div>
+                <div className="extract-helper"><Sparkles size={14} /><span>ננסה כמה מקורות חילוץ (Schema.org, תגיות העמוד וטקסט גלוי), ונשתמש ב־AI אם חסרים פרטים והמפתח האישי זמין.</span></div>
+                <button type="button" className="text-button extract-paste-toggle" onClick={() => setShowPasteFallback((value) => !value)}>{showPasteFallback ? 'הסתרת שדה הדבקת טקסט' : 'האתר חוסם חילוץ? אפשר להדביק כאן את תוכן המתכון'}</button>
+                {showPasteFallback && <div className="field extract-paste-field"><label htmlFor="recipe-pasted-text">תוכן המתכון מהאתר</label><textarea id="recipe-pasted-text" rows="7" value={pastedText} onChange={(event) => setPastedText(event.target.value)} placeholder="פתחו את עמוד המתכון, העתיקו את הכותרת, רשימת הרכיבים והוראות ההכנה והדביקו כאן. אם מוגדר מפתח API, ChefBox תנסה לחלץ מהטקסט." /></div>}
 
                 {error && <div className="inline-alert error-alert"><AlertCircle size={17} /><span>{error}</span></div>}
-                {notice && <div className="inline-alert success-alert"><CheckCircle2 size={17} /><span>{notice}</span></div>}
+                {notice && <div className={`inline-alert ${noticeKind === 'warning' ? 'warning-alert' : 'success-alert'}`}><CheckCircle2 size={17} /><span>{notice}</span></div>}
 
                 {hasPreview ? (
                   <div className="extraction-preview">
@@ -151,7 +168,7 @@ export default function AddRecipeModal({ isOpen, onClose, onSave, initialRecipe 
                     {draft.sourceUrl && <a href={draft.sourceUrl} target="_blank" rel="noreferrer" className="source-link-preview">מעבר לעמוד המקור <ExternalLink size={14} /></a>}
                   </div>
                 ) : (
-                  <div className="extract-empty-guide"><div className="extract-guide-icon"><Link2 size={23} /></div><strong>המתכון שלכם, בלי להקליד הכול מחדש</strong><p>הדביקו קישור לאתר מתכונים ציבורי. אם העמוד מאפשר גישה, ChefBox תנסה לחלץ ממנו תמונה, רכיבים והוראות.</p><span>Schema.org <i /> OpenGraph <i /> Meta tags</span></div>
+                  <div className="extract-empty-guide"><div className="extract-guide-icon"><Link2 size={23} /></div><strong>המתכון שלכם, בלי להקליד הכול מחדש</strong><p>הדביקו קישור לאתר מתכונים ציבורי. אם האתר חוסם גישה אוטומטית, פתחו את אפשרות הדבקת הטקסט והעתיקו מהעמוד את הרכיבים והוראות ההכנה.</p><span>Schema.org <i /> OpenGraph <i /> Meta tags</span></div>
                 )}
               </div>
             ) : (
