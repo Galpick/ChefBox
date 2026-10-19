@@ -25,3 +25,13 @@ git push origin main
 ## Remaining limitation
 
 A static GitHub Pages app cannot guarantee access to every recipe URL: source sites and public CORS proxies may block requests. A personal OpenAI API key does not download a page or bypass CORS. The updated modal therefore provides a paste-text fallback; when text can be obtained, the user's own key can be used to parse it.
+
+
+## נוספו בגרסת Gemini / Google Drive
+
+- בחירת ספק AI בין Google Gemini ל־OpenAI, שמירת מפתח Gemini בנפרד, בדיקת המפתח ושימוש ב־Gemini URL Context לצורך ניסיון חילוץ ישיר מה־URL.
+- מסך הגדרות פותח את Google AI Studio ליצירת מפתח. הקוד אינו קורא מפתח אוטומטית מדומיין Google אחר; יש להעתיק ולהדביק אותו.
+- נוספה התחברות Google והעלאת גיבוי JSON ל־Google Drive בתיקייה `ChefBox Backups`. נדרש OAuth Web Client ID והפעלת Drive API.
+- נוסף ייבוא מתכונים מ־JSON (גיבוי ChefBox או מערך) ומ־CSV, עם דילוג על כפילויות.
+- Workflow של GitHub Pages מקבל `VITE_GOOGLE_CLIENT_ID` מהמשתנה הציבורי של המאגר `GOOGLE_CLIENT_ID`.
+- מפתחות AI ואסימוני Google אינם נכללים בגיבוי. אסימון Drive נשמר בזיכרון בלבד ודורש חיבור מחדש אחרי רענון.

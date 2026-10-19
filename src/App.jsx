@@ -1,6 +1,12 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowDownToLine,
+  Cloud,
+  ExternalLink,
+  FileUp,
+  LogIn,
+  LogOut,
+  Upload,
   CalendarDays,
   Check,
   CheckCheck,
@@ -40,12 +46,22 @@ import {
   resetDemoData,
   saveAiApiKey,
   deleteAiApiKey,
+  deleteGeminiApiKey,
+  getGeminiApiKey,
+  saveGeminiApiKey,
   saveMealPlan,
   saveRecipe,
   saveSettings,
   saveShoppingItems,
 } from './services/storage.js';
-import { testOpenAiApiKey } from './services/aiParser.js';
+import { testGeminiApiKey, testOpenAiApiKey } from './services/aiParser.js';
+import {
+  backupToGoogleDrive,
+  connectGoogleDrive,
+  disconnectGoogleDrive,
+  getBuiltInGoogleClientId,
+  preloadGoogleIdentityServices,
+} from './services/googleDrive.js';
 
 const VIEW_META = {
   recipes: { title: 'כל המתכונים', subtitle: 'המתכונים האהובים עליכם, מסודרים במקום אחד.' },
@@ -100,6 +116,10 @@ export default function App() {
   const [shoppingItems, setShoppingItems] = useState(() => getShoppingItems());
   const [settings, setSettings] = useState(() => getSettings());
   const [aiApiKey, setAiApiKey] = useState(() => getAiApiKey());
+  const [geminiApiKey, setGeminiApiKey] = useState(() => getGeminiApiKey());
+  const [driveAccount, setDriveAccount] = useState(null);
+  const [driveBackupLink, setDriveBackupLink] = useState('');
+  const [driveBusy, setDriveBusy] = useState(false);
   const [toast, setToast] = useState(null);
   const [shoppingFilter, setShoppingFilter] = useState('all');
 
@@ -116,6 +136,10 @@ export default function App() {
     window.addEventListener('chefbox:navigate', navigate);
     return () => window.removeEventListener('chefbox:navigate', navigate);
   }, []);
+
+  useEffect(() => {
+    if (activeView === 'settings') preloadGoogleIdentityServices();
+  }, [activeView]);
 
   useEffect(() => {
     if (activeView !== 'recipes' && activeView !== 'favorites') setCategoryFilter('הכל');
@@ -255,7 +279,10 @@ export default function App() {
   };
 
   const handleSettingsChange = (key, value) => {
-    const next = { ...settings, [key]: value };
+    let next = { ...settings, [key]: value };
+    if (key === 'aiProvider') {
+      next = { ...next, aiModel: value === 'gemini' ? 'gemini-3.8-flash' : 'gpt-5-mini' };
+    }
     setSettings(next);
     saveSettings(next);
   };
@@ -273,6 +300,134 @@ export default function App() {
     showToast('מפתח ה־API נמחק מהדפדפן', 'info');
   };
 
+  const handleSaveGeminiApiKey = (key) => {
+    const normalizedKey = String(key || '').trim();
+    saveGeminiApiKey(normalizedKey);
+    setGeminiApiKey(normalizedKey);
+    showToast('מפתח Gemini נשמר בדפדפן הזה');
+  };
+
+  const handleDeleteGeminiApiKey = () => {
+    deleteGeminiApiKey();
+    setGeminiApiKey('');
+    showToast('מפתח Gemini נמחק מהדפדפן', 'info');
+  };
+
+  const handleConnectDrive = async (clientId) => {
+    setDriveBusy(true);
+    try {
+      const account = await connectGoogleDrive(clientId);
+      setDriveAccount(account);
+      setDriveBackupLink('');
+      showToast(`התחברת ל־Google Drive${account.email ? ` כ־${account.email}` : ''}`);
+      return account;
+    } catch (error) {
+      showToast(error?.message || 'התחברות ל־Google Drive נכשלה', 'error');
+      throw error;
+    } finally {
+      setDriveBusy(false);
+    }
+  };
+
+  const buildBackupPayload = () => {
+    const safeSettings = { ...settings };
+    // OAuth Client ID is public, but import/export does not need to carry account-specific config.
+    delete safeSettings.googleOAuthClientId;
+    return {
+      app: 'ChefBox',
+      schemaVersion: 1,
+      exportedAt: new Date().toISOString(),
+      recipes,
+      mealPlan,
+      shoppingItems,
+      settings: safeSettings,
+    };
+  };
+
+  const handleBackupDrive = async () => {
+    setDriveBusy(true);
+    try {
+      const result = await backupToGoogleDrive(buildBackupPayload());
+      setDriveBackupLink(result.webViewLink || '');
+      showToast(`הגיבוי נשמר ב־Google Drive: ${result.name}`);
+      return result;
+    } catch (error) {
+      showToast(error?.message || 'שמירת הגיבוי ב־Google Drive נכשלה', 'error');
+      throw error;
+    } finally {
+      setDriveBusy(false);
+    }
+  };
+
+  const handleDisconnectDrive = () => {
+    disconnectGoogleDrive();
+    setDriveAccount(null);
+    setDriveBackupLink('');
+    showToast('ההתנתקות מ־Google Drive הושלמה', 'info');
+  };
+
+  const handleImportRecipesFile = async (file) => {
+    if (!file) return { added: 0, skipped: 0 };
+    const text = await file.text();
+    let imported;
+    if (/\.csv$/i.test(file.name) || file.type.includes('csv')) {
+      imported = parseCsvRecipes(text);
+    } else {
+      let parsed;
+      try { parsed = JSON.parse(text); }
+      catch { throw new Error('הקובץ אינו JSON תקין. אפשר לייבא גיבוי ChefBox או מערך מתכונים בקובץ JSON.'); }
+      imported = Array.isArray(parsed) ? parsed
+        : Array.isArray(parsed?.recipes) ? parsed.recipes
+          : Array.isArray(parsed?.data?.recipes) ? parsed.data.recipes
+            : parsed?.recipe && typeof parsed.recipe === 'object' ? [parsed.recipe]
+              : parsed?.data && Array.isArray(parsed.data) ? parsed.data : [];
+    }
+    if (!Array.isArray(imported) || !imported.length) throw new Error('לא נמצאו מתכונים בקובץ. קובץ JSON צריך לכלול מערך recipes או מערך של מתכונים.');
+
+    let current = getRecipes();
+    const originalCount = current.length;
+    let added = 0;
+    let skipped = 0;
+    const makeKey = (recipe) => String(recipe?.name || recipe?.title || '').trim().toLocaleLowerCase('he').replace(/\s+/g, ' ');
+    const normalizeSource = (recipe) => String(recipe?.sourceUrl || recipe?.url || '').trim().replace(/\/$/, '').toLocaleLowerCase();
+    for (const raw of imported) {
+      if (!raw || typeof raw !== 'object') { skipped += 1; continue; }
+      const name = String(raw.name || raw.title || raw.recipeName || '').trim();
+      if (!name) { skipped += 1; continue; }
+      const candidate = {
+        ...raw,
+        id: '',
+        name,
+        category: String(raw.category || raw.recipeCategory || 'ללא קטגוריה'),
+        prepTime: Number(raw.prepTime ?? raw.preparationTime ?? 0) || 0,
+        cookTime: Number(raw.cookTime ?? raw.cookingTime ?? 0) || 0,
+        servings: Number(raw.servings ?? raw.recipeYield ?? 2) || 2,
+        image: String(raw.image || raw.imageUrl || ''),
+        sourceUrl: String(raw.sourceUrl || raw.url || ''),
+        ingredients: Array.isArray(raw.ingredients || raw.recipeIngredient) ? (raw.ingredients || raw.recipeIngredient).map((item) => typeof item === 'string' ? item : item?.name || item?.text || '').filter(Boolean) : typeof (raw.ingredients || raw.recipeIngredient) === 'string' ? (raw.ingredients || raw.recipeIngredient).split(/\r?\n|\s*\|\s*|\s*;\s*/).map((x) => x.trim()).filter(Boolean) : [],
+        instructions: Array.isArray(raw.instructions || raw.recipeInstructions || raw.recipeDirections) ? (raw.instructions || raw.recipeInstructions || raw.recipeDirections).map((item) => typeof item === 'string' ? item : item?.text || item?.name || '').filter(Boolean) : typeof (raw.instructions || raw.recipeInstructions || raw.recipeDirections) === 'string' ? (raw.instructions || raw.recipeInstructions || raw.recipeDirections).split(/\r?\n|\s*\|\s*|\s*;\s*/).map((x) => x.trim()).filter(Boolean) : [],
+        favorite: Boolean(raw.favorite),
+        createdAt: raw.createdAt || new Date().toISOString(),
+      };
+      const nameKey = makeKey(candidate);
+      const sourceKey = normalizeSource(candidate);
+      const duplicate = current.some((recipe) => {
+        const sameSource = sourceKey && normalizeSource(recipe) === sourceKey;
+        const sameName = makeKey(recipe) === nameKey;
+        return Boolean(sameSource || (sameName && (!sourceKey || !normalizeSource(recipe) || normalizeSource(recipe) === sourceKey)));
+      });
+      if (duplicate) { skipped += 1; continue; }
+      candidate.id = makeClientId();
+      saveRecipe(candidate);
+      current = getRecipes();
+      added += 1;
+    }
+    setRecipes(getRecipes());
+    if (!added && !skipped && originalCount) throw new Error('לא נמצאו מתכונים שניתן לייבא.');
+    showToast(`ייבוא הושלם: נוספו ${added} מתכונים, דולגו ${skipped}`);
+    return { added, skipped };
+  };
+
   const handleResetDemo = () => {
     const answer = window.confirm('לאפס את ChefBox לנתוני הדוגמה? המתכונים, תכנון הארוחות ורשימת הקניות המקומיים יוחלפו.');
     if (!answer) return;
@@ -287,14 +442,7 @@ export default function App() {
   };
 
   const handleExport = () => {
-    const backup = {
-      app: 'ChefBox',
-      exportedAt: new Date().toISOString(),
-      recipes,
-      mealPlan,
-      shoppingItems,
-      settings,
-    };
+    const backup = buildBackupPayload();
     const blob = new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' });
     const objectUrl = URL.createObjectURL(blob);
     const link = document.createElement('a');
@@ -384,7 +532,29 @@ export default function App() {
             ) : activeView === 'shopping' ? (
               <ShoppingView items={shoppingItems} onToggle={handleToggleShoppingItem} onDelete={handleDeleteShoppingItem} onAddManual={handleAddManualShoppingItem} onClearCompleted={handleClearCompleted} filter={shoppingFilter} onFilterChange={setShoppingFilter} onNavigateRecipes={() => handleNavigate('recipes')} />
             ) : (
-              <SettingsView settings={settings} onChange={handleSettingsChange} onExport={handleExport} onReset={handleResetDemo} recipeCount={recipes.length} apiKey={aiApiKey} onSaveApiKey={handleSaveAiApiKey} onDeleteApiKey={handleDeleteAiApiKey} onTestApiKey={(key) => testOpenAiApiKey(key, settings.aiModel || 'gpt-5-mini')} />
+              <SettingsView
+                settings={settings}
+                onChange={handleSettingsChange}
+                onExport={handleExport}
+                onReset={handleResetDemo}
+                recipeCount={recipes.length}
+                apiKey={aiApiKey}
+                geminiApiKey={geminiApiKey}
+                onSaveOpenAiApiKey={handleSaveAiApiKey}
+                onDeleteOpenAiApiKey={handleDeleteAiApiKey}
+                onSaveGeminiApiKey={handleSaveGeminiApiKey}
+                onDeleteGeminiApiKey={handleDeleteGeminiApiKey}
+                onTestOpenAiApiKey={(key) => testOpenAiApiKey(key, settings.aiModel || 'gpt-5-mini')}
+                onTestGeminiApiKey={(key) => testGeminiApiKey(key, settings.aiModel || 'gemini-3.8-flash')}
+                onImportFile={handleImportRecipesFile}
+                onConnectDrive={handleConnectDrive}
+                onBackupDrive={handleBackupDrive}
+                onDisconnectDrive={handleDisconnectDrive}
+                driveAccount={driveAccount}
+                driveBackupLink={driveBackupLink}
+                driveBusy={driveBusy}
+                builtInGoogleClientId={getBuiltInGoogleClientId()}
+              />
             )}
 
             <footer className="app-footer"><span>© 2026 ChefBox</span><span>בישול טוב מתחיל בתכנון טוב <span className="footer-heart">♥</span></span><span className="footer-status"><i /> הנתונים נשמרים מקומית</span></footer>
@@ -397,6 +567,50 @@ export default function App() {
       {toast && <div className={`toast toast-${toast.kind}`} role="status"><span className="toast-icon">{toast.kind === 'success' ? <Check size={17} /> : <CircleHelp size={17} />}</span><span>{toast.message}</span><button onClick={() => setToast(null)} aria-label="סגירת הודעה"><X size={15} /></button></div>}
     </div>
   );
+}
+
+function parseCsvRecipes(sourceText) {
+  const rows = [];
+  let row = [];
+  let cell = '';
+  let quoted = false;
+  const text = String(sourceText || '').replace(/^\uFEFF/, '');
+  for (let i = 0; i < text.length; i += 1) {
+    const char = text[i];
+    if (char === '"' && quoted && text[i + 1] === '"') { cell += '"'; i += 1; }
+    else if (char === '"') quoted = !quoted;
+    else if (char === ',' && !quoted) { row.push(cell); cell = ''; }
+    else if ((char === '\n' || char === '\r') && !quoted) {
+      if (char === '\r' && text[i + 1] === '\n') i += 1;
+      row.push(cell); cell = '';
+      if (row.some((value) => String(value).trim())) rows.push(row);
+      row = [];
+    } else cell += char;
+  }
+  row.push(cell);
+  if (row.some((value) => String(value).trim())) rows.push(row);
+  if (rows.length < 2) throw new Error('קובץ ה־CSV ריק או שחסרה בו שורת נתונים.');
+  const normalizeHeader = (value) => String(value || '').trim().toLocaleLowerCase('he').replace(/[ _-]+/g, '');
+  const headers = rows[0].map(normalizeHeader);
+  const indexFor = (...names) => headers.findIndex((header) => names.map(normalizeHeader).includes(header));
+  const valueAt = (record, ...names) => {
+    const index = indexFor(...names);
+    return index >= 0 ? String(record[index] || '').trim() : '';
+  };
+  const splitValues = (value) => String(value || '').split(/\r?\n|\s*\|\s*|\s*;\s*/).map((part) => part.trim()).filter(Boolean);
+  const result = rows.slice(1).map((record) => ({
+    name: valueAt(record, 'name', 'title', 'recipeName', 'שם', 'שםמתכון', 'מתכון'),
+    category: valueAt(record, 'category', 'recipeCategory', 'קטגוריה') || 'ללא קטגוריה',
+    prepTime: Number(valueAt(record, 'prepTime', 'preparationTime', 'זמןהכנה')) || 0,
+    cookTime: Number(valueAt(record, 'cookTime', 'cookingTime', 'זמןבישול')) || 0,
+    servings: Number(valueAt(record, 'servings', 'מנות', 'מספרמנות')) || 2,
+    image: valueAt(record, 'image', 'imageUrl', 'תמונה'),
+    sourceUrl: valueAt(record, 'sourceUrl', 'url', 'מקור', 'קישור'),
+    ingredients: splitValues(valueAt(record, 'ingredients', 'רכיבים', 'מצרכים')),
+    instructions: splitValues(valueAt(record, 'instructions', 'steps', 'directions', 'הוראות', 'הוראותהכנה', 'הכנה')),
+  })).filter((recipe) => recipe.name);
+  if (!result.length) throw new Error('לא זוהו שמות מתכונים בשורות ה־CSV. בדקו שכותרת העמודה היא name או שם מתכון.');
+  return result;
 }
 
 function normalizeIngredient(name) {
@@ -469,25 +683,60 @@ function ShoppingView({ items, onToggle, onDelete, onAddManual, onClearCompleted
   );
 }
 
-function SettingsView({ settings, onChange, onExport, onReset, recipeCount, apiKey, onSaveApiKey, onDeleteApiKey, onTestApiKey }) {
+function SettingsView({
+  settings,
+  onChange,
+  onExport,
+  onReset,
+  recipeCount,
+  apiKey,
+  geminiApiKey,
+  onSaveOpenAiApiKey,
+  onDeleteOpenAiApiKey,
+  onSaveGeminiApiKey,
+  onDeleteGeminiApiKey,
+  onTestOpenAiApiKey,
+  onTestGeminiApiKey,
+  onImportFile,
+  onConnectDrive,
+  onBackupDrive,
+  onDisconnectDrive,
+  driveAccount,
+  driveBackupLink,
+  driveBusy,
+  builtInGoogleClientId = '',
+}) {
   const [draftApiKey, setDraftApiKey] = useState('');
   const [showApiKey, setShowApiKey] = useState(false);
   const [keyStatus, setKeyStatus] = useState('');
   const [keyStatusKind, setKeyStatusKind] = useState('info');
   const [testingKey, setTestingKey] = useState(false);
+  const [importStatus, setImportStatus] = useState('');
+  const [importStatusKind, setImportStatusKind] = useState('info');
+  const [driveStatus, setDriveStatus] = useState('');
+  const fileInputRef = useRef(null);
+
+  const provider = settings.aiProvider === 'gemini' ? 'gemini' : 'openai';
+  const providerLabel = provider === 'gemini' ? 'Gemini' : 'OpenAI';
+  const currentApiKey = provider === 'gemini' ? geminiApiKey : apiKey;
+  const model = settings.aiModel || (provider === 'gemini' ? 'gemini-3.8-flash' : 'gpt-5-mini');
+  const effectiveGoogleClientId = settings.googleOAuthClientId === undefined
+    ? String(builtInGoogleClientId || '').trim()
+    : String(settings.googleOAuthClientId || '').trim();
 
   const saveKey = () => {
     const normalized = draftApiKey.trim();
     if (!normalized) {
-      setKeyStatus('הזינו מפתח חדש לפני השמירה.');
+      setKeyStatus(`הזינו מפתח ${providerLabel} חדש לפני השמירה.`);
       setKeyStatusKind('error');
       return;
     }
     try {
-      onSaveApiKey(normalized);
+      if (provider === 'gemini') onSaveGeminiApiKey(normalized);
+      else onSaveOpenAiApiKey(normalized);
       setDraftApiKey('');
       setShowApiKey(false);
-      setKeyStatus('המפתח נשמר במכשיר הזה. הוא לא ייכלל בגיבוי המתכונים.');
+      setKeyStatus(`מפתח ${providerLabel} נשמר בדפדפן הזה. הוא לא ייכלל בגיבוי המתכונים.`);
       setKeyStatusKind('success');
     } catch (error) {
       setKeyStatus(error?.message || 'לא ניתן לשמור את המפתח.');
@@ -496,20 +745,21 @@ function SettingsView({ settings, onChange, onExport, onReset, recipeCount, apiK
   };
 
   const testKey = async () => {
-    const keyToTest = draftApiKey.trim() || apiKey;
+    const keyToTest = draftApiKey.trim() || currentApiKey;
     if (!keyToTest) {
-      setKeyStatus('הזינו מפתח API או שמרו מפתח לפני הבדיקה.');
+      setKeyStatus(`הזינו מפתח ${providerLabel} או שמרו מפתח לפני הבדיקה.`);
       setKeyStatusKind('error');
       return;
     }
     setTestingKey(true);
     setKeyStatus('');
     try {
-      await onTestApiKey(keyToTest);
-      setKeyStatus('החיבור ל־OpenAI הצליח והמפתח התקבל.');
+      if (provider === 'gemini') await onTestGeminiApiKey(keyToTest);
+      else await onTestOpenAiApiKey(keyToTest);
+      setKeyStatus(`החיבור ל־${providerLabel} הצליח והמפתח התקבל.`);
       setKeyStatusKind('success');
     } catch (error) {
-      setKeyStatus(error?.message || 'בדיקת המפתח נכשלה.');
+      setKeyStatus(error?.message || `בדיקת מפתח ${providerLabel} נכשלה.`);
       setKeyStatusKind('error');
     } finally {
       setTestingKey(false);
@@ -518,9 +768,10 @@ function SettingsView({ settings, onChange, onExport, onReset, recipeCount, apiK
 
   const removeKey = () => {
     try {
-      onDeleteApiKey();
+      if (provider === 'gemini') onDeleteGeminiApiKey();
+      else onDeleteOpenAiApiKey();
       setDraftApiKey('');
-      setKeyStatus('המפתח הוסר מהדפדפן.');
+      setKeyStatus(`מפתח ${providerLabel} הוסר מהדפדפן.`);
       setKeyStatusKind('info');
     } catch (error) {
       setKeyStatus(error?.message || 'לא ניתן למחוק את המפתח.');
@@ -528,57 +779,126 @@ function SettingsView({ settings, onChange, onExport, onReset, recipeCount, apiK
     }
   };
 
+  const handleImportChange = async (event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    setImportStatus('קוראים את הקובץ ומייבאים מתכונים...');
+    setImportStatusKind('info');
+    try {
+      const result = await onImportFile(file);
+      setImportStatus(`הייבוא הסתיים: נוספו ${result.added} מתכונים; דולגו ${result.skipped} מתכונים כפולים או לא תקינים.`);
+      setImportStatusKind(result.added ? 'success' : 'info');
+    } catch (error) {
+      setImportStatus(error?.message || 'ייבוא הקובץ נכשל. בדקו את מבנה הקובץ ונסו שוב.');
+      setImportStatusKind('error');
+    } finally {
+      event.target.value = '';
+    }
+  };
+
+  const connectDrive = async () => {
+    setDriveStatus('');
+    try {
+      const account = await onConnectDrive(effectiveGoogleClientId);
+      setDriveStatus(`מחוברים לחשבון Google${account?.email ? `: ${account.email}` : ''}.`);
+    } catch (error) {
+      setDriveStatus(error?.message || 'התחברות ל־Google נכשלה.');
+    }
+  };
+
+  const backupDrive = async () => {
+    setDriveStatus('');
+    try {
+      const result = await onBackupDrive();
+      setDriveStatus(`הגיבוי נשמר בהצלחה: ${result?.name || 'קובץ גיבוי חדש'}`);
+    } catch (error) {
+      setDriveStatus(error?.message || 'שמירת הגיבוי נכשלה.');
+    }
+  };
+
   return (
     <>
-      <PageIntro icon={ClipboardList} eyebrow="שליטה בחוויה שלכם" title="הגדרות ChefBox" subtitle="התאימו את סביבת העבודה וניהלו את הנתונים שנשמרים במכשיר הזה." />
+      <PageIntro icon={ClipboardList} eyebrow="שליטה בחוויה שלכם" title="הגדרות ChefBox" subtitle="נהלו ספק AI, ייבוא מתכונים וגיבוי לחשבון Google שלכם." />
       <div className="settings-layout">
         <section className="settings-panel settings-panel-wide ai-settings-panel">
           <div className="settings-panel-title">
             <span className="settings-panel-icon"><KeyRound size={19} /></span>
-            <div><h2>מפתח API אישי לחילוץ AI</h2><p>כל משתמש יכול להזין את המפתח שלו. השימוש נעשה ישירות מהדפדפן, בלי מפתח משותף בקוד האתר.</p></div>
+            <div><h2>חילוץ מתכונים באמצעות AI</h2><p>בחרו ספק AI והגדירו מפתח אישי. המפתח נשמר מקומית בדפדפן ואינו נכלל בגיבויים.</p></div>
+          </div>
+          <div className="api-key-input-wrap" style={{ maxWidth: 460, marginBottom: 18 }}>
+            <label htmlFor="chefbox-ai-provider">ספק AI</label>
+            <select id="chefbox-ai-provider" className="settings-text-input" value={provider} onChange={(event) => { onChange('aiProvider', event.target.value); setDraftApiKey(''); setKeyStatus(''); }}>
+              <option value="gemini">Google Gemini — מומלץ לחילוץ מכתובת URL</option>
+              <option value="openai">OpenAI</option>
+            </select>
           </div>
           <div className="api-key-status-row">
-            <span className={`api-key-status-dot ${apiKey ? 'api-key-status-dot-active' : ''}`} />
-            <div><strong>{apiKey ? 'מפתח אישי מוגדר בדפדפן הזה' : 'לא הוגדר מפתח API'}</strong><span>{apiKey ? 'הערך עצמו מוסתר. אפשר להחליף אותו או להסירו.' : 'ללא מפתח, חילוץ Schema.org ו־Meta ימשיך לפעול ככל שהאתר מאפשר.'}</span></div>
+            <span className={`api-key-status-dot ${currentApiKey ? 'api-key-status-dot-active' : ''}`} />
+            <div><strong>{currentApiKey ? `מפתח ${providerLabel} מוגדר בדפדפן הזה` : `לא הוגדר מפתח ${providerLabel}`}</strong><span>{currentApiKey ? 'אפשר להחליף את המפתח, לבדוק אותו או להסירו.' : 'לחילוץ AI נדרש מפתח אישי. חילוץ Schema.org ותגיות עמוד עשוי לפעול גם בלעדיו.'}</span></div>
           </div>
           <div className="api-key-form-row">
             <div className="api-key-input-wrap">
-              <label htmlFor="chefbox-api-key">מפתח OpenAI API</label>
+              <label htmlFor="chefbox-api-key">מפתח {providerLabel} API</label>
               <div className="api-key-input-shell">
-                <input
-                  id="chefbox-api-key"
-                  type={showApiKey ? 'text' : 'password'}
-                  value={draftApiKey}
-                  onChange={(event) => setDraftApiKey(event.target.value)}
-                  placeholder={apiKey ? 'מפתח שמור — הזינו כאן מפתח חדש להחלפה' : 'הדביקו את מפתח ה־API האישי שלכם'}
-                  autoComplete="off"
-                  spellCheck="false"
-                  dir="ltr"
-                />
-                <button type="button" className="api-key-visibility-button" aria-label={showApiKey ? 'הסתרת המפתח' : 'הצגת המפתח'} onClick={() => setShowApiKey((value) => !value)}>
-                  {showApiKey ? <EyeOff size={17} /> : <Eye size={17} />}
-                </button>
+                <input id="chefbox-api-key" type={showApiKey ? 'text' : 'password'} value={draftApiKey} onChange={(event) => setDraftApiKey(event.target.value)} placeholder={currentApiKey ? 'מפתח שמור — הזינו מפתח חדש להחלפה' : `הדביקו את מפתח ${providerLabel} האישי שלכם`} autoComplete="off" spellCheck="false" dir="ltr" />
+                <button type="button" className="api-key-visibility-button" aria-label={showApiKey ? 'הסתרת המפתח' : 'הצגת המפתח'} onClick={() => setShowApiKey((value) => !value)}>{showApiKey ? <EyeOff size={17} /> : <Eye size={17} />}</button>
               </div>
             </div>
             <div className="api-key-button-stack">
               <button type="button" className="primary-button" onClick={saveKey} disabled={!draftApiKey.trim()}><KeyRound size={16} /> שמירת מפתח</button>
-              <button type="button" className="secondary-button" onClick={testKey} disabled={testingKey || (!draftApiKey.trim() && !apiKey)}>{testingKey ? <LoaderCircle className="spin" size={16} /> : <CheckCircle2 size={16} />}{testingKey ? 'בודקים...' : 'בדיקת מפתח'}</button>
-              {apiKey && <button type="button" className="text-button api-key-remove" onClick={removeKey}>מחיקת המפתח השמור</button>}
+              <button type="button" className="secondary-button" onClick={testKey} disabled={testingKey || (!draftApiKey.trim() && !currentApiKey)}>{testingKey ? <LoaderCircle className="spin" size={16} /> : <CheckCircle2 size={16} />}{testingKey ? 'בודקים...' : 'בדיקת מפתח'}</button>
+              {currentApiKey && <button type="button" className="text-button api-key-remove" onClick={removeKey}>מחיקת המפתח השמור</button>}
             </div>
           </div>
+          {provider === 'gemini' && <div className="settings-note" style={{ marginTop: 14 }}>
+            <p><strong>יצירת מפתח בלחיצה:</strong> לחצו על הכפתור לפתיחת Google AI Studio, צרו/העתיקו את המפתח שם והדביקו אותו בשדה לעיל. Google עשויה ליצור מפתח ברירת מחדל למשתמש חדש לאחר אישור התנאים; הדפדפן אינו יכול לקרוא את המפתח אוטומטית מתוך אתר Google מטעמי אבטחה.</p>
+            <button type="button" className="secondary-button" onClick={() => window.open('https://aistudio.google.com/app/apikey', '_blank', 'noopener,noreferrer')}><ExternalLink size={16} /> פתיחת Google AI Studio ליצירת מפתח</button>
+            <p><a href="https://ai.google.dev/gemini-api/docs/api-key" target="_blank" rel="noreferrer">הנחיות רשמיות למפתחות Gemini</a></p>
+          </div>}
           <div className="api-model-row">
-            <div className="api-key-input-wrap"><label htmlFor="chefbox-ai-model">מודל AI</label><input id="chefbox-ai-model" className="settings-text-input" value={settings.aiModel || 'gpt-5-mini'} onChange={(event) => onChange('aiModel', event.target.value)} placeholder="gpt-5-mini" dir="ltr" /></div>
-            <p>הזינו מזהה מודל שזמין בפרויקט OpenAI שלכם. שימוש במודל עשוי להיות כרוך בעלות לפי התעריפים של ספק ה־API.</p>
+            <div className="api-key-input-wrap"><label htmlFor="chefbox-ai-model">מודל AI</label><input id="chefbox-ai-model" className="settings-text-input" value={model} onChange={(event) => onChange('aiModel', event.target.value)} placeholder={provider === 'gemini' ? 'gemini-3.8-flash' : 'gpt-5-mini'} dir="ltr" /></div>
+            <p>{provider === 'gemini' ? 'מודל ברירת המחדל תומך ב־URL Context כדי לנסות לקרוא עמוד מתכון גם אם Proxy בדפדפן נחסם.' : 'הזינו מזהה מודל שזמין בפרויקט OpenAI שלכם.'} שימוש במודל עשוי להיות כרוך בעלות ובמגבלות מכסה אצל ספק ה־API.</p>
           </div>
           {keyStatus && <div className={`inline-alert api-key-feedback ${keyStatusKind === 'error' ? 'error-alert' : keyStatusKind === 'success' ? 'success-alert' : ''}`} role="status">{keyStatusKind === 'success' ? <CheckCircle2 size={17} /> : <CircleHelp size={17} />}<span>{keyStatus}</span></div>}
-          <div className="api-key-warning"><span><CircleHelp size={17} /></span><p><strong>חשוב לדעת:</strong> האתר סטטי והמפתח משמש ישירות בדפדפן ונשמר ב־LocalStorage של הדפדפן הזה. הוא לא נשלח למאגר Git ולא נכלל בקובץ הגיבוי, אך אינו מוגן כמו מפתח שנשמר בשרת. אל תשתמשו במפתח בעל הרשאות רחבות, ואל תגדירו מפתח במחשב ציבורי. <a href="https://help.openai.com/en/articles/5112595-best-practices-for-api-key-safety" target="_blank" rel="noreferrer">הנחיות OpenAI לאבטחת מפתחות</a>.</p></div>
+          <div className="api-key-warning"><span><CircleHelp size={17} /></span><p><strong>חשוב לדעת:</strong> האתר סטטי והמפתח משמש ישירות בדפדפן ונשמר ב־LocalStorage של הדפדפן הזה. אין לשמור API keys בגיט או במכשיר ציבורי. Google ממליצה לא לחשוף מפתחות לקוח בפרודקשן; ההגדרה הזו מיועדת לאפליקציה אישית ולשימוש עם מפתח שהוגבל בהתאם. <a href="https://ai.google.dev/gemini-api/docs/api-key" target="_blank" rel="noreferrer">כללי אבטחת מפתחות Gemini</a>.</p></div>
         </section>
 
-        <section className="settings-panel"><div className="settings-panel-title"><span className="settings-panel-icon"><Utensils size={19} /></span><div><h2>העדפות תצוגה</h2><p>הגדירו איך תיראה ספריית המתכונים שלכם.</p></div></div>
+        <section className="settings-panel settings-panel-wide">
+          <div className="settings-panel-title"><span className="settings-panel-icon"><Cloud size={19} /></span><div><h2>חשבון Google וגיבוי ל־Drive</h2><p>התחברו לחשבון Google ואפשרו ל־ChefBox ליצור גיבויי JSON בתיקייה ייעודית ב־Drive.</p></div></div>
+          <div className="api-key-input-wrap" style={{ marginBottom: 14 }}>
+            <label htmlFor="chefbox-google-client-id">Google OAuth Client ID</label>
+            <input id="chefbox-google-client-id" className="settings-text-input" value={settings.googleOAuthClientId === undefined ? builtInGoogleClientId : settings.googleOAuthClientId} onChange={(event) => onChange('googleOAuthClientId', event.target.value)} placeholder="123456789-....apps.googleusercontent.com" dir="ltr" autoComplete="off" />
+          </div>
+          <div className="api-key-button-stack" style={{ display: 'flex', flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 10 }}>
+            {!driveAccount ? <button type="button" className="primary-button" onClick={connectDrive} disabled={driveBusy || !effectiveGoogleClientId}><LogIn size={16} /> {driveBusy ? 'מתחברים...' : 'התחברות לחשבון Google'}</button> : <><span className="api-key-status-row"><span className="api-key-status-dot api-key-status-dot-active" /><span><strong>מחוברים ל־Google</strong><small>{driveAccount.email}</small></span></span><button type="button" className="primary-button" onClick={backupDrive} disabled={driveBusy}><Cloud size={16} /> {driveBusy ? 'שומרים גיבוי...' : 'גיבוי ל־Drive עכשיו'}</button><button type="button" className="secondary-button" onClick={connectDrive} disabled={driveBusy || !effectiveGoogleClientId}><LogIn size={16} /> חיבור מחדש</button><button type="button" className="secondary-button" onClick={onDisconnectDrive} disabled={driveBusy}><LogOut size={16} /> התנתקות</button></>}
+          </div>
+          {driveStatus && <div className={`inline-alert api-key-feedback ${/נכשל|לא ניתן|חסר|פג|שגיאה/i.test(driveStatus) ? 'error-alert' : 'success-alert'}`} role="status"><Cloud size={17} /><span>{driveStatus}</span></div>}
+          {driveBackupLink && <p className="settings-note"><a href={driveBackupLink} target="_blank" rel="noreferrer">פתיחת הגיבוי האחרון ב־Google Drive <ExternalLink size={14} /></a></p>}
+          <div className="settings-note">
+            <p><strong>הגדרה חד־פעמית לבעל האתר:</strong> ב־Google Cloud צרו OAuth Client מסוג Web application, הפעילו Google Drive API, והוסיפו את כתובת GitHub Pages תחת Authorized JavaScript origins. לאחר מכן הגדירו במאגר GitHub משתנה Actions בשם <code>GOOGLE_CLIENT_ID</code> והפעילו פריסה מחדש. אם לא הוגדר משתנה, ניתן לבדוק את החיבור באמצעות הזנת Client ID בשדה הזה בדפדפן הנוכחי.</p>
+            <p><a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noreferrer">פתיחת Google Cloud Credentials <ExternalLink size={14} /></a> · <a href="https://developers.google.com/workspace/drive/api/quickstart/js" target="_blank" rel="noreferrer">מדריך רשמי ל־Drive API</a></p>
+          </div>
+        </section>
+
+        <section className="settings-panel settings-panel-wide">
+          <div className="settings-panel-title"><span className="settings-panel-icon settings-icon-orange"><FileUp size={19} /></span><div><h2>ייבוא מתכונים מקובץ</h2><p>ייבאו מתכונים מגיבוי ChefBox בפורמט JSON או מקובץ CSV עם עמודות מתאימות.</p></div></div>
+          <div className="backup-info-row"><div><strong>{recipeCount} מתכונים בספרייה</strong><span>הייבוא ימזג מתכונים חדשים וידלג על מתכונים כפולים לפי כתובת המקור או השם.</span></div><button type="button" className="secondary-button" onClick={() => fileInputRef.current?.click()}><Upload size={16} /> בחירת קובץ לייבוא</button><input ref={fileInputRef} type="file" accept=".json,.csv,application/json,text/csv" style={{ display: 'none' }} onChange={handleImportChange} /></div>
+          {importStatus && <div className={`inline-alert api-key-feedback ${importStatusKind === 'error' ? 'error-alert' : importStatusKind === 'success' ? 'success-alert' : ''}`} role="status"><FileUp size={17} /><span>{importStatus}</span></div>}
+          <p className="settings-note">קובץ JSON יכול להיות גיבוי מלא שיוצא מ־ChefBox (השדה <code>recipes</code>) או מערך מתכונים. CSV צריך לכלול כותרות כגון <code>name</code>, <code>ingredients</code> ו־<code>instructions</code>. מפתחות AI והרשאות Google לא מיובאים.</p>
+        </section>
+
+        <section className="settings-panel">
+          <div className="settings-panel-title"><span className="settings-panel-icon"><Utensils size={19} /></span><div><h2>העדפות תצוגה</h2><p>הגדירו איך תיראה ספריית המתכונים שלכם.</p></div></div>
           <SettingToggle title="כרטיסיות קומפקטיות" description="הציגו יותר מתכונים בכל שורה עם פחות רווחים." checked={Boolean(settings.compactCards)} onChange={(value) => onChange('compactCards', value)} />
           <SettingToggle title="הודעת נתוני דוגמה" description="הציגו הסבר כשהספרייה כוללת מתכונים לדוגמה." checked={Boolean(settings.showDemoNote)} onChange={(value) => onChange('showDemoNote', value)} />
         </section>
-        <section className="settings-panel"><div className="settings-panel-title"><span className="settings-panel-icon settings-icon-orange"><ArrowDownToLine size={19} /></span><div><h2>גיבוי נתונים</h2><p>הורידו קובץ JSON עם המתכונים, התכנון ורשימת הקניות.</p></div></div><div className="backup-info-row"><div><strong>{recipeCount} מתכונים</strong><span>שמורים בדפדפן הנוכחי</span></div><button className="secondary-button" onClick={onExport}><ArrowDownToLine size={16} /> ייצוא גיבוי</button></div><p className="settings-note">המידע נשמר ב־LocalStorage של הדפדפן. הוא לא מסתנכרן אוטומטית בין מכשירים או דפדפנים. שמרו גיבוי לפני ניקוי נתוני גלישה.</p></section>
+
+        <section className="settings-panel">
+          <div className="settings-panel-title"><span className="settings-panel-icon settings-icon-orange"><ArrowDownToLine size={19} /></span><div><h2>גיבוי מקומי</h2><p>הורידו קובץ JSON עם המתכונים, התכנון ורשימת הקניות.</p></div></div>
+          <div className="backup-info-row"><div><strong>{recipeCount} מתכונים</strong><span>שמורים בדפדפן הנוכחי</span></div><button className="secondary-button" onClick={onExport}><ArrowDownToLine size={16} /> ייצוא גיבוי</button></div>
+          <p className="settings-note">מומלץ לשמור גיבוי מקומי בנוסף ל־Drive. המפתח האישי של Gemini/OpenAI לא נכלל בגיבוי.</p>
+        </section>
+
         <section className="settings-panel settings-danger-panel"><div className="settings-panel-title"><span className="settings-panel-icon settings-icon-red"><Trash2 size={19} /></span><div><h2>איפוס נתונים</h2><p>שחזרו את האפליקציה למצב התחלתי לצורך הדגמה.</p></div></div><div className="backup-info-row"><div><strong>שחזור נתוני הדוגמה</strong><span>המתכונים האישיים, התכנון והרשימה יוחלפו.</span></div><button className="danger-button" onClick={onReset}><Trash2 size={15} /> איפוס נתונים</button></div></section>
       </div>
     </>

@@ -4,6 +4,7 @@ const KEYS = {
   shopping: 'chefbox:shopping-list:v1',
   settings: 'chefbox:settings:v1',
   aiApiKey: 'chefbox:ai-api-key:v1',
+  geminiApiKey: 'chefbox:gemini-api-key:v1',
 };
 
 const DEMO_RECIPES = [
@@ -174,7 +175,19 @@ export function saveShoppingItems(items) {
 }
 
 export function getSettings() {
-  return readJson(KEYS.settings, { compactCards: false, showDemoNote: true, aiModel: 'gpt-5-mini' });
+  const value = readJson(KEYS.settings, null);
+  const existing = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  const storedModel = String(existing.aiModel || '');
+  // Preserve old installations: a saved GPT model means the user was already using OpenAI.
+  const inferredProvider = existing.aiProvider || (storedModel.startsWith('gpt-') ? 'openai' : 'gemini');
+  const modelMatchesProvider = inferredProvider === 'gemini' ? storedModel.startsWith('gemini-') : storedModel.startsWith('gpt-');
+  return {
+    compactCards: false,
+    showDemoNote: true,
+    ...existing,
+    aiProvider: inferredProvider,
+    aiModel: modelMatchesProvider ? storedModel : (inferredProvider === 'gemini' ? 'gemini-3.8-flash' : 'gpt-5-mini'),
+  };
 }
 
 export function saveSettings(settings) {
@@ -225,4 +238,37 @@ export function resetDemoData() {
 
 function makeId() {
   return globalThis.crypto?.randomUUID?.() || `recipe-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+}
+
+
+// Gemini keys are stored separately from recipes/settings and never enter backup exports.
+export function getGeminiApiKey() {
+  try {
+    return window.localStorage.getItem(KEYS.geminiApiKey) || '';
+  } catch (error) {
+    console.warn('ChefBox could not read the local Gemini key.', error);
+    return '';
+  }
+}
+
+export function saveGeminiApiKey(apiKey) {
+  try {
+    const normalized = String(apiKey || '').trim();
+    if (!normalized) throw new Error('יש להזין מפתח Gemini API.');
+    window.localStorage.setItem(KEYS.geminiApiKey, normalized);
+    return true;
+  } catch (error) {
+    console.warn('ChefBox could not save the local Gemini key.', error);
+    throw new Error(error?.message || 'לא ניתן לשמור את מפתח Gemini בדפדפן.');
+  }
+}
+
+export function deleteGeminiApiKey() {
+  try {
+    window.localStorage.removeItem(KEYS.geminiApiKey);
+    return true;
+  } catch (error) {
+    console.warn('ChefBox could not remove the local Gemini key.', error);
+    throw new Error('לא ניתן למחוק את מפתח Gemini מהדפדפן.');
+  }
 }

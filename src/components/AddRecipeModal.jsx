@@ -78,7 +78,7 @@ export default function AddRecipeModal({ isOpen, onClose, onSave, initialRecipe 
       setDraft(nextDraft);
       setIngredientsText((nextDraft.ingredients || []).join('\n'));
       setInstructionsText((nextDraft.instructions || []).join('\n'));
-      const methodLabel = parsed.parsedBy === 'schema.org' ? 'Schema.org' : parsed.parsedBy === 'ai' ? 'AI' : parsed.parsedBy === 'text' ? 'הטקסט שהודבק' : 'העמוד';
+      const methodLabel = parsed.parsedBy === 'schema.org' ? 'Schema.org' : ['gemini', 'gemini-url-context'].includes(parsed.parsedBy) ? 'Google Gemini' : parsed.parsedBy === 'openai' ? 'OpenAI' : parsed.parsedBy === 'text' ? 'הטקסט שהודבק' : 'העמוד';
       setNoticeKind(parsed.extractionWarning ? 'warning' : 'success');
       setNotice(`החילוץ הסתיים באמצעות ${methodLabel}. ${parsed.extractionWarning || 'מומלץ לעבור על הפרטים לפני השמירה.'}`);
     } catch (extractError) {
@@ -147,9 +147,9 @@ export default function AddRecipeModal({ isOpen, onClose, onSave, initialRecipe 
                     {loading ? 'מחלצים...' : 'חלצו מתכון'}
                   </button>
                 </div>
-                <div className="extract-helper"><Sparkles size={14} /><span>ננסה כמה מקורות חילוץ (Schema.org, תגיות העמוד וטקסט גלוי), ונשתמש ב־AI אם חסרים פרטים והמפתח האישי זמין.</span></div>
+                <div className="extract-helper"><Sparkles size={14} /><span>ננסה Schema.org ותגיות עמוד. כש־Google Gemini נבחר ומוגדר מפתח, ננסה גם URL Context לקריאת המקור ישירות.</span></div>
                 <button type="button" className="text-button extract-paste-toggle" onClick={() => setShowPasteFallback((value) => !value)}>{showPasteFallback ? 'הסתרת שדה הדבקת טקסט' : 'האתר חוסם חילוץ? אפשר להדביק כאן את תוכן המתכון'}</button>
-                {showPasteFallback && <div className="field extract-paste-field"><label htmlFor="recipe-pasted-text">תוכן המתכון מהאתר</label><textarea id="recipe-pasted-text" rows="7" value={pastedText} onChange={(event) => setPastedText(event.target.value)} placeholder="פתחו את עמוד המתכון, העתיקו את הכותרת, רשימת הרכיבים והוראות ההכנה והדביקו כאן. אם מוגדר מפתח API, ChefBox תנסה לחלץ מהטקסט." /></div>}
+                {showPasteFallback && <div className="field extract-paste-field"><label htmlFor="recipe-pasted-text">תוכן המתכון מהאתר</label><textarea id="recipe-pasted-text" rows="7" value={pastedText} onChange={(event) => setPastedText(event.target.value)} placeholder="פתחו את עמוד המתכון, העתיקו את הכותרת, רשימת הרכיבים והוראות ההכנה והדביקו כאן. אם הוגדר מפתח לספק AI שנבחר בהגדרות, ChefBox תנסה לחלץ מהטקסט." /></div>}
 
                 {error && <div className="inline-alert error-alert"><AlertCircle size={17} /><span>{error}</span></div>}
                 {notice && <div className={`inline-alert ${noticeKind === 'warning' ? 'warning-alert' : 'success-alert'}`}><CheckCircle2 size={17} /><span>{notice}</span></div>}
